@@ -1,8 +1,7 @@
 import logging
 from dotenv import load_dotenv
 
-from livekit_plugins.filler_guard import FillerGuard 
-
+from livekit_plugins.filler_guard import FillerGuard
 
 from livekit.agents import (
     Agent,
@@ -36,31 +35,29 @@ class MyAgent(Agent):
                 "Be curious, friendly, with a light sense of humor. "
                 "Speak English to the user."
             ),
-            # IMPORTANT: we will manually interrupt via FillerGuard
-            allow_interruptions=False,
+            allow_interruptions=False,  # we interrupt manually via FillerGuard
         )
 
     async def on_enter(self):
-        # Kick things off with a greeting
         self.session.generate_reply()
 
     @function_tool
     async def lookup_weather(
         self, context: RunContext, location: str, latitude: str, longitude: str
     ):
-        """Called when the user asks for weather information.
+        """
+        Called when the user asks for weather information.
 
         Args:
-            location: City or region the user asked about
-            latitude: Estimated latitude (do not ask user)
-            longitude: Estimated longitude (do not ask user)
+            location: City or region the user asked about.
+            latitude: Estimated latitude (do not ask the user).
+            longitude: Estimated longitude (do not ask the user).
         """
         logger.info(f"Looking up weather for {location}")
         return "sunny with a temperature of 70 degrees."
 
 
 def prewarm(proc: JobProcess):
-    # Load VAD once per worker process
     proc.userdata["vad"] = silero.VAD.load()
 
 
@@ -68,26 +65,19 @@ async def entrypoint(ctx: JobContext):
     ctx.log_context_fields = {"room": ctx.room.name}
 
     session = AgentSession(
-        # Ears
+        # Ears / Brain / Voice
         stt="assemblyai/universal-streaming:en",
-        # Brain
         llm="openai/gpt-4.1-mini",
-        # Voice
         tts="cartesia/sonic-2:9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
         # Turn detection + VAD
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
-
-        # Preemptive generation allowed
+        # Make the agent feel quick; we still control true interrupts via guard
         preemptive_generation=True,
-
-        # If you keep these on, SDK can auto-resume on noise-only false interruptions.
-        # FillerGuard still controls "real" interrupts programmatically.
         resume_false_interruption=True,
         false_interruption_timeout=1.0,
     )
 
-    # Collect usage metrics
     usage_collector = metrics.UsageCollector()
 
     @session.on("metrics_collected")
@@ -111,7 +101,7 @@ async def entrypoint(ctx: JobContext):
         room_output_options=RoomOutputOptions(transcription_enabled=True),
     )
 
-    # Attach the filler/command guard AFTER session.start
+    # Attach filler/command guard AFTER start
     FillerGuard(session)
 
 
