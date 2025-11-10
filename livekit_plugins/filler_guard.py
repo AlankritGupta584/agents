@@ -2,14 +2,14 @@
 # livekit_plugins/filler_guard.py
 import asyncio, logging, os, re, unicodedata
 from collections import deque
+from threading import Lock
 from typing import Iterable, List, Set
-from threading import Lock  # <-- use threading.Lock for sync setters
 
 from livekit.agents import (
     AgentSession,
-    UserInputTranscribedEvent,
     AgentStateChangedEvent,
     SpeechCreatedEvent,
+    UserInputTranscribedEvent,
 )
 
 log = logging.getLogger("filler_guard")
@@ -17,43 +17,42 @@ log = logging.getLogger("filler_guard")
 _DEFAULT_IGNORED = ["uh", "umm", "um", "hmm", "haan", "huh", "mmm", "erm", "hmmkay"]
 _DEFAULT_COMMANDS = ["stop", "wait", "hold on", "one second", "pause", "no", "not that", "cancel"]
 
+
 def _env_list(name: str, default: List[str]) -> List[str]:
     val = os.getenv(name)
     return [x.strip() for x in val.split(",")] if val else default[:]
 
+
 def _norm(s: str) -> str:
-    # Unicode normalize, lowercase, collapse repeated letters, drop punctuation
     s = unicodedata.normalize("NFKD", s).lower()
-    s = re.sub(r"[^\w\s]", " ", s)            # remove punct/symbols
-    s = re.sub(r"(\w)\1{2,}", r"\1\1", s)     # cap long elongations (hmmmm -> hmm)
+    s = re.sub(r"[^\w\s]", " ", s)
+    s = re.sub(r"(\w)\1{2,}", r"\1\1", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
 
 def _tokens_from_norm(norm_text: str) -> List[str]:
     return [t for t in norm_text.split(" ") if t]
 
-class FillerGuard:
-    """
-    Ignore filler-only speech while the agent is speaking; interrupt immediately on commands.
-    """
 
+class FillerGuard:
     def __init__(
         self,
         session: AgentSession,
         ignored_words: Iterable[str] | None = None,
         interrupt_words: Iterable[str] | None = None,
         *,
-        min_chars_when_speaking: int = 1,   # heuristic fallback when no confidence
-        window_secs: float = 2.0,           # (reserved for future timed buffer expiry)
+        min_chars_when_speaking: int = 1,
+        window_secs: float = 2.0,
     ) -> None:
         self.session = session
         self.ignored: Set[str] = set(_norm(w) for w in (ignored_words or _env_list("IGNORED_WORDS", _DEFAULT_IGNORED)))
         self.commands: List[str] = [_norm(w) for w in (interrupt_words or _env_list("INTERRUPT_WORDS", _DEFAULT_COMMANDS))]
         self._speaking = False
-        self._buf = deque(maxlen=6)  # short rolling buffer of recent partials
-        self._lock = Lock()          # <-- safe in sync setters
+        self._buf = deque(maxlen=6)
+        self._lock = Lock()
         self._min_chars = min_chars_when_speaking
-        self._window_secs = window_secs
+        self._window_secs = window_secs  # reserved for timed expiry if needed
 
         @session.on("agent_state_changed")
         def _on_state(evt: AgentStateChangedEvent):
@@ -67,10 +66,8 @@ class FillerGuard:
 
         @session.on("user_input_transcribed")
         def _on_transcribed(evt: UserInputTranscribedEvent):
-            # Handle asynchronously to avoid blocking internal loop.
             asyncio.create_task(self._handle_transcript(evt))
 
-    # These setters may be called from RPC or handlers - keep them thread-safe.
     def update_ignored(self, words: Iterable[str]) -> None:
         with self._lock:
             self.ignored = set(_norm(w) for w in words)
@@ -81,11 +78,7 @@ class FillerGuard:
 
     async def _handle_transcript(self, evt: UserInputTranscribedEvent) -> None:
         text = evt.transcript or ""
-        if not text:
-            return
-
-        if not self._speaking:
-            # Agent is quiet: register speech normally (do nothing here)
+        if not text or not self._speaking:
             return
 
         norm_text = _norm(text)
@@ -93,21 +86,18 @@ class FillerGuard:
         if not toks:
             return
 
-        # 1) Mixed / command detection across a rolling window (handles "umm okay stop")
         self._buf.append(norm_text)
-        window_text = " ".join(self._buf)[-256:]  # cheap tail cap
+        window_text = " ".join(self._buf)[-256:]
         if any(cmd in window_text for cmd in self.commands):
-            log.info("Valid interruption detected: %r", window_text)
-            self.session.interrupt()  # stop TTS immediately
+            log.info("Valid interruption: %r", window_text)
+            self.session.interrupt()
             return
 
-        # 2) Filler-only check
         if all(t in self.ignored for t in toks) and len(norm_text.replace(" ", "")) >= self._min_chars:
-            log.debug("Ignored filler while speaking: %r", norm_text)
+            log.debug("Ignored filler: %r", norm_text)
             return
 
-        # 3) Non-filler with enough content → interrupt
         non_filler = [t for t in toks if t not in self.ignored]
         if non_filler and sum(len(t) for t in non_filler) >= self._min_chars:
-            log.info("Non-filler speech during agent speech: interrupting (%r)", norm_text)
+            log.info("Interrupt on non-filler: %r", norm_text)
             self.session.interrupt()
